@@ -6,6 +6,7 @@ import time
 import threading
 import telebot
 from telebot.types import BotCommand
+import gradio as gr
 
 # Lấy thông tin từ biến môi trường
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -52,15 +53,18 @@ def get_gold_price():
 
 # Cấu hình Menu lệnh
 def set_bot_commands():
-    commands = [
-        BotCommand("start", "Xem hướng dẫn sử dụng"),
-        BotCommand("manual", "Lấy giá vàng ngay"),
-        BotCommand("auto", "Bật tự động gửi mỗi 10 phút"),
-        BotCommand("stop", "Dừng gửi tự động"),
-        BotCommand("checkprice", "Đặt báo động giá"),
-        BotCommand("uncheck", "Hủy báo động giá")
-    ]
-    bot.set_my_commands(commands)
+    try:
+        commands = [
+            BotCommand("start", "Xem hướng dẫn sử dụng"),
+            BotCommand("manual", "Lấy giá vàng ngay"),
+            BotCommand("auto", "Bật tự động gửi mỗi 10 phút"),
+            BotCommand("stop", "Dừng gửi tự động"),
+            BotCommand("checkprice", "Đặt báo động giá"),
+            BotCommand("uncheck", "Hủy báo động giá")
+        ]
+        bot.set_my_commands(commands)
+    except Exception as e:
+        print(f"Error setting commands: {e}")
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -88,7 +92,6 @@ def auto_worker(chat_id):
     while auto_status.get(chat_id, False):
         _, msg = get_gold_price()
         bot.send_message(chat_id, msg, parse_mode="HTML")
-        # Chờ 10 phút = 60 lần lặp x 10 giây
         for _ in range(60): 
             if not auto_status.get(chat_id, False): break
             time.sleep(10)
@@ -154,7 +157,26 @@ def uncheck_price(message):
     else:
         bot.send_message(message.chat.id, "⚠️ Chưa đặt báo giá nào.")
 
-if __name__ == "__main__":
+def run_bot():
     set_bot_commands()
-    print("🤖 Bot đang chạy (10 phút/lần & Giao diện thu gọn)...")
+    print("🤖 Bot đang chạy...")
     bot.infinity_polling()
+
+# Giao diện Gradio để Hugging Face không tắt Space
+def dummy_fn():
+    return "Bot is running 24/7!"
+
+if __name__ == "__main__":
+    # Chạy Telegram Bot trong một thread riêng
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    # Chạy giao diện Gradio (Hugging Face yêu cầu một web server)
+    with gr.Blocks() as demo:
+        gr.Markdown("# 🤖 Telegram Gold Price Bot")
+        gr.Markdown("Bot is currently running in the background.")
+        status = gr.Textbox(label="Status", value="Online")
+        refresh = gr.Button("Check Status")
+        refresh.click(fn=dummy_fn, outputs=status)
+    
+    demo.launch(server_name="0.0.0.0", server_port=7860)
