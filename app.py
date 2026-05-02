@@ -9,41 +9,23 @@ from telebot import apihelper
 from telebot.types import BotCommand
 import gradio as gr
 
-# --- Chẩn đoán mạng ---
-def diagnose_network():
-    print("🌐 Đang kiểm tra kết nối mạng...")
-    targets = ["https://www.google.com", "https://api.telegram.org"]
-    for target in targets:
-        try:
-            start = time.time()
-            r = requests.get(target, timeout=10)
-            print(f"✅ Kết nối đến {target} thành công (Status: {r.status_code}, Time: {time.time()-start:.2f}s)")
-        except Exception as e:
-            print(f"❌ Kết nối đến {target} thất bại: {e}")
-
-# --- Cấu hình Timeout ---
+# --- Cấu hình Timeout & API ---
 apihelper.READ_TIMEOUT = 60
 apihelper.CONNECT_TIMEOUT = 60
 
-# Lấy Token
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-
-if not BOT_TOKEN:
-    print("❌ ERROR: TELEGRAM_BOT_TOKEN không tìm thấy!")
-else:
-    print(f"✅ Token loaded: {BOT_TOKEN[:5]}***{BOT_TOKEN[-5:]}")
-
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Quản lý trạng thái
-auto_status = {}
-price_alerts = {}
+auto_status = {}      # {chat_id: bool}
+price_alerts = {}     # {chat_id: {"target": float, "direction": str}}
+bot_started = False
 
 def get_gold_price():
     url = "https://giavang.org/the-gioi/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = requests.get(url, headers=headers, timeout=25)
         if response.status_code != 200: return None, f"❌ Lỗi HTTP {response.status_code}"
         soup = BeautifulSoup(response.text, 'html.parser')
         price_span = soup.find('span', class_='crypto-price')
@@ -72,6 +54,7 @@ def get_gold_price():
     except Exception as e:
         return None, f"❌ Lỗi: {str(e)}"
 
+# Cấu hình Menu lệnh
 def set_bot_commands():
     commands = [
         BotCommand("start", "Xem hướng dẫn sử dụng"),
@@ -83,19 +66,19 @@ def set_bot_commands():
     ]
     try:
         bot.set_my_commands(commands)
-        print("✅ Đã thiết lập Menu lệnh.")
-    except Exception as e:
-        print(f"⚠️ Không thể thiết lập Menu lệnh: {e}. Bot vẫn sẽ tiếp tục chạy.")
+    except:
+        pass
 
+# --- Message Handlers ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     help_text = (
-        "<b>Chào mừng bạn đến với Bot Giá Vàng!</b> 🌟\n\n"
+        "<b>Chào mừng bạn!</b> 🌟\n\n"
         "▶️ /manual : Lấy giá ngay lập tức\n"
-        "▶️ /auto : Gửi giá tự động mỗi 10 phút\n"
+        "▶️ /auto : Tự động gửi mỗi 10 phút\n"
         "▶️ /stop : Dừng gửi tự động\n"
-        "▶️ /checkprice [giá] : Báo chuông khi đạt giá\n"
-        "▶️ /uncheck : Hủy bỏ báo giá\n"
+        "▶️ /checkprice [giá] : Báo động khi đạt giá\n"
+        "▶️ /uncheck : Hủy báo động\n"
     )
     bot.reply_to(message, help_text, parse_mode="HTML")
 
@@ -104,33 +87,107 @@ def manual_fetch(message):
     _, msg = get_gold_price()
     bot.send_message(message.chat.id, msg, parse_mode="HTML")
 
-# --- Polling Loop thủ công ---
+# --- Logic Auto Send (10 phút) ---
+def auto_worker(chat_id):
+    while auto_status.get(chat_id, False):
+        # Chờ 10 phút (chia nhỏ để có thể dừng ngay lập tức)
+        for _ in range(60): 
+            if not auto_status.get(chat_id, False): return
+            time.sleep(10)
+        
+        if auto_status.get(chat_id, False):
+            _, msg = get_gold_price()
+            bot.send_message(chat_id, msg, parse_mode="HTML")
+
+@bot.message_handler(commands=['auto'])
+def start_auto(message):
+    chat_id = message.chat.id
+    if auto_status.get(chat_id, False):
+        bot.send_message(chat_id, "⚠️ Đã bật tự động rồi.")
+    else:
+        auto_status[chat_id] = True
+        bot.send_message(chat_id, "✅ Đã bật tự động gửi mỗi 10 phút. Đang lấy giá...")
+        # Gửi ngay lập tức 1 lần
+        _, msg = get_gold_price()
+        bot.send_message(chat_id, msg, parse_mode="HTML")
+        threading.Thread(target=auto_worker, args=(chat_id,), daemon=True).start()
+
+@bot.message_handler(commands=['stop'])
+def stop_auto(message):
+    auto_status[message.chat.id] = False
+    bot.send_message(message.chat.id, "🛑 Đã dừng gửi tự động.")
+
+# --- Logic Price Alert ---
+def check_price_worker(chat_id, target, direction):
+    while chat_id in price_alerts and price_alerts[chat_id]['target'] == target:
+        current, _ = get_gold_price()
+        if current:
+            triggered = False
+            if direction == "UP" and current >= target: triggered = True
+            elif direction == "DOWN" and current <= target: triggered = True
+            
+            if triggered:
+                bot.send_message(chat_id, f"🎯 <b>MỤC TIÊU {target} USD ĐÃ ĐẠT!</b>\nGiá hiện tại: <code>{current}</code>", parse_mode="HTML")
+                if chat_id in price_alerts: del price_alerts[chat_id]
+                break
+        time.sleep(60)
+
+@bot.message_handler(commands=['checkprice'])
+def set_price_alert(message):
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "⚠️ Nhập giá: /checkprice 2750")
+            return
+        target = float(args[1])
+        current, _ = get_gold_price()
+        if not current:
+            bot.reply_to(message, "❌ Lỗi lấy giá hiện tại.")
+            return
+        direction = "UP" if target > current else "DOWN"
+        price_alerts[message.chat.id] = {"target": target, "direction": direction}
+        bot.send_message(message.chat.id, f"🚀 Đã đặt cảnh báo: <b>{target} USD</b>", parse_mode="HTML")
+        threading.Thread(target=check_price_worker, args=(message.chat.id, target, direction), daemon=True).start()
+    except ValueError:
+        bot.reply_to(message, "❌ Giá không hợp lệ.")
+
+@bot.message_handler(commands=['uncheck'])
+def uncheck_price(message):
+    if message.chat.id in price_alerts:
+        del price_alerts[message.chat.id]
+        bot.send_message(message.chat.id, "🚫 Đã hủy báo giá.")
+    else:
+        bot.send_message(message.chat.id, "⚠️ Chưa đặt báo giá nào.")
+
 def run_bot():
+    global bot_started
+    if bot_started: return
+    bot_started = True
+    
     if not BOT_TOKEN: return
     
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+        
     time.sleep(5)
-    diagnose_network()
     set_bot_commands()
     
-    print("🤖 Bot đang bắt đầu Polling...")
+    print("🤖 Bot đang chạy trên Render...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=60, long_polling_timeout=60)
         except Exception as e:
-            print(f"❌ Lỗi Polling: {e}. Thử lại sau 15s...")
-            time.sleep(15)
-
-def dummy_fn():
-    return "Bot is running!"
+            if "Conflict" in str(e):
+                time.sleep(30)
+            else:
+                time.sleep(10)
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
+    threading.Thread(target=run_bot, daemon=True).start()
+    port = int(os.environ.get("PORT", 7860))
     with gr.Blocks() as demo:
-        gr.Markdown("# 🤖 Telegram Gold Price Bot")
-        status = gr.Textbox(label="Status", value="Online")
-        refresh = gr.Button("Check Status")
-        refresh.click(fn=dummy_fn, outputs=status)
-    
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+        gr.Markdown("# 🤖 Telegram Gold Bot")
+        gr.Markdown("Bot is running 24/7 on Render.")
+    demo.launch(server_name="0.0.0.0", server_port=port)
