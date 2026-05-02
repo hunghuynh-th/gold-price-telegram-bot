@@ -123,11 +123,13 @@ def check_price_worker(chat_id, target, direction):
         current, _ = get_gold_price()
         if current:
             triggered = False
-            if direction == "UP" and current >= target: triggered = True
-            elif direction == "DOWN" and current <= target: triggered = True
+            # Trigger nếu giá chạm, vượt qua hoặc nằm trong khoảng +- 3 USD so với mục tiêu
+            if direction == "UP" and current >= (target - 3): triggered = True
+            elif direction == "DOWN" and current <= (target + 3): triggered = True
             
             if triggered:
-                bot.send_message(chat_id, f"🎯 <b>MỤC TIÊU {target} USD ĐÃ ĐẠT!</b>\nGiá hiện tại: <code>{current}</code>", parse_mode="HTML")
+                status_msg = "ĐÃ ĐẠT" if (direction == "UP" and current >= target) or (direction == "DOWN" and current <= target) else "GẦN CHẠM"
+                bot.send_message(chat_id, f"🎯 <b>MỤC TIÊU {target} USD {status_msg}!</b>\nGiá hiện tại: <code>{current}</code>", parse_mode="HTML")
                 if chat_id in price_alerts: del price_alerts[chat_id]
                 break
         time.sleep(60)
